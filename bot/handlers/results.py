@@ -9,7 +9,7 @@ from aiogram.types import Message, CallbackQuery
 from bot.db.database import Database
 from bot.db import queries
 from bot.keyboards.inline import results_period_kb
-from bot.utils.formatting import format_daily_summary, PAIR_INFO
+from bot.utils.formatting import format_daily_summary, PAIR_INFO, _fmt_money
 
 router = Router()
 
@@ -53,7 +53,7 @@ async def cb_results_month(callback: CallbackQuery, db: Database) -> None:
     text = (
         f"📊 {start.strftime('%d.%m.%Y')} — {now.strftime('%d.%m.%Y')}\n\n"
         f"🔹 Закрытых позиций: {len(positions)}\n"
-        f"🔹 Прибыль: {profit:.2f} USDT"
+        f"🔹 Прибыль: {_fmt_money(profit)} USDT"
     )
     if not positions:
         text = f"📊 {start.strftime('%d.%m.%Y')} — {now.strftime('%d.%m.%Y')}\n\nНет закрытых позиций за период."
@@ -71,7 +71,7 @@ async def cb_results_all(callback: CallbackQuery, db: Database) -> None:
     text = (
         f"📊 За всё время\n\n"
         f"🔹 Закрытых позиций: {len(positions)}\n"
-        f"🔹 Прибыль: {profit:.2f} USDT"
+        f"🔹 Прибыль: {_fmt_money(profit)} USDT"
     )
     if not positions:
         text = "📊 За всё время\n\nНет закрытых позиций."

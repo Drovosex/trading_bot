@@ -6,6 +6,14 @@ from bot.db.models import OrderType, TradingSettings
 MIN_ORDER_USDT = 2.0
 
 
+class OrderTooSmall(Exception):
+    """Raised when computed order size is below exchange minimum."""
+    def __init__(self, computed: float, minimum: float) -> None:
+        self.computed = computed
+        self.minimum = minimum
+        super().__init__(f"Order size {computed:.2f} below minimum {minimum:.2f}")
+
+
 def compute_order_size(
     settings: TradingSettings,
     free_balance: float,
@@ -13,7 +21,8 @@ def compute_order_size(
 ) -> float | None:
     """Compute order size in quote currency (USDT/USDC).
 
-    Returns None if the computed size is below minimum or balance is insufficient.
+    Returns None if balance is insufficient.
+    Raises OrderTooSmall if computed size is below exchange minimum.
     """
     if free_balance < MIN_ORDER_USDT:
         return None
@@ -31,7 +40,7 @@ def compute_order_size(
         size = min(settings.order_param, free_balance)
 
     if size < MIN_ORDER_USDT:
-        return None
+        raise OrderTooSmall(size, MIN_ORDER_USDT)
 
     return round(size, 2)
 
@@ -50,4 +59,4 @@ def compute_expected_income(buy_cost: float, profit_pct: float, taker_fee: float
     """Compute expected income from a position after fees."""
     gross = buy_cost * (profit_pct / 100)
     fee = buy_cost * (taker_fee / 100) * 2  # fee on buy + sell
-    return round(gross - fee, 2)
+    return round(gross - fee, 6)

@@ -6,17 +6,34 @@ Telegram-бот для автоматического скальпинга на 
 
 ## Возможности
 
-- Автоматическая торговля BTC/USDC, KAS/USDT, XRP/USDT, SOL/USDT
+- Автоматическая торговля BTC/USDC, KAS/USDT, KAS/USDC, XRP/USDT, SOL/USDT
 - Динамические и фиксированные ордера
 - WebSocket мониторинг цен в реальном времени
 - REST polling для обнаружения исполненных sell-ордеров
+- REST fallback для пар с низким объёмом (каждые 15 сек)
 - Восстановление после сбоев (SQLite WAL + сверка с биржей)
 - Демо-режим с виртуальным балансом $5000
-- Ежедневная сводка по прибыли (02:00 UTC)
+- Кнопочное меню с подменю и навигацией (reply + inline keyboards)
+- Пагинация открытых позиций (10 шт. на странице)
+- Ежедневная сводка по прибыли (00:00 МСК)
+- Ежемесячная сводка (1-е число, 06:00 МСК)
 - Шифрование API-ключей (Fernet AES-128-CBC)
+- Диалог подтверждения при смене API-ключей
+- Автоостановка при невалидных API-ключах (ошибка 10072)
 - Ограничение доступа по Telegram user ID
 
-## Команды бота
+## Управление ботом
+
+### Главное меню (reply-кнопки)
+
+| Кнопка | Подменю |
+|--------|---------|
+| 📊 Торговля | ▶️ Старт, ⏹ Стоп, 📈 Статус, 🛒 Купить |
+| 💰 Информация | 💵 Баланс, 💲 Цена, 📋 Позиции, 📊 Средняя, 📈 Результаты |
+| ⚙️ Настройки | Пара, Тип ордера, Размер, Прибыль%, Снижение%, Комиссия |
+| ❓ Помощь | Справка с описанием всех команд |
+
+### Команды
 
 | Команда | Описание |
 |---------|----------|
@@ -25,6 +42,8 @@ Telegram-бот для автоматического скальпинга на 
 | `/start_trade` | Запуск торговли |
 | `/stop_trade` | Остановка торговли |
 | `/status` | Текущий статус алгоритма |
+| `/buy` | Немедленная покупка |
+| `/price` | Текущая цена |
 | `/balance` | Баланс на бирже |
 | `/results` | Результаты за период |
 | `/open_orders` | Открытые позиции |
@@ -37,11 +56,10 @@ Telegram-бот для автоматического скальпинга на 
 ## Стек
 
 - Python 3.12, aiogram 3.x
-- pymexc (REST), websockets (WS)
+- aiohttp (MEXC REST API), websockets (WS)
 - aiosqlite (SQLite WAL)
 - cryptography (Fernet)
 - APScheduler, pydantic-settings, structlog
-- Docker
 
 ## Быстрый старт
 
@@ -90,9 +108,12 @@ bot/
 ├── exchange/           # MEXC API: REST client, WebSocket, models
 ├── trading/            # Торговый движок: engine, strategy, calculator, order_manager
 ├── handlers/           # Telegram команды (aiogram routers)
-├── keyboards/          # Inline-клавиатуры
+│   └── menu.py         # Reply-кнопки → inline-подменю, навигация, пагинация
+├── keyboards/
+│   ├── inline.py       # Inline-клавиатуры (подменю, настройки, пагинация)
+│   └── reply.py        # Главное reply-меню (2×2 кнопки)
 ├── middlewares/        # Auth (admin), Subscription (stub)
-├── notifications/      # Уведомления (daily summary)
+├── notifications/      # Уведомления (daily/monthly summary)
 ├── security/           # Fernet шифрование API-ключей
 ├── services/           # Демо-режим
 └── utils/              # Форматирование, scheduler

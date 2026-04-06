@@ -6,6 +6,7 @@ from aiogram.types import Message
 
 from bot.db.database import Database
 from bot.db import queries
+from bot.keyboards.reply import main_menu_kb
 from bot.services.demo import DemoEngine
 
 router = Router()
@@ -27,7 +28,10 @@ async def cmd_start(message: Message, db: Database) -> None:
 
     existing = await queries.get_user(db, user_id)
     if existing:
-        await message.answer("Вы уже зарегистрированы в системе.")
+        await message.answer(
+            "Вы уже зарегистрированы в системе.",
+            reply_markup=main_menu_kb(),
+        )
         return
 
     await queries.upsert_user(db, user_id, username)
@@ -43,26 +47,34 @@ async def cmd_start(message: Message, db: Database) -> None:
         "Он автоматически покупает выбранный актив — BTC, KAS, XRP или SOL — "
         "и продает только при его росте.\n\n"
         "📌 Что дальше?\n"
-        "Нужно связать бот с вашим аккаунтом на бирже MEXC по API.\n\n"
-        "❕ Доступные команды — /help"
+        "1️⃣ Привяжите API-ключи MEXC: /set_api\n"
+        "2️⃣ Настройте параметры: ⚙️ Настройки\n"
+        "3️⃣ Запустите торговлю: ▶️ Старт\n\n"
+        "Используйте кнопки внизу экрана для управления.",
+        reply_markup=main_menu_kb(),
     )
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(
-        "ℹ️ Доступные команды:\n\n"
-        "/start_trade — запустить автоматическую торговлю\n"
-        "/stop_trade — остановить автоматическую торговлю\n"
-        "/balance — баланс на бирже\n"
-        "/results — результаты за день или период\n"
-        "/status — статус торгового алгоритма\n"
-        "/settings — параметры торговли\n"
-        "/open_orders — открытые позиции\n"
-        "/average — средняя цена\n"
-        "/fee — настройка комиссии биржи\n"
-        "/demo — демо-счёт\n"
-        "/help — эта справка"
+        "ℹ️ Управление ботом\n\n"
+        "Используйте кнопки внизу экрана или команды:\n\n"
+        "▶️ Старт — запустить торговлю — /start_trade\n"
+        "⏹ Стоп — остановить торговлю — /stop_trade\n"
+        "🛒 Купить — немедленная покупка — /buy\n"
+        "📊 Статус — статус алгоритма — /status\n"
+        "💰 Баланс — баланс на бирже — /balance\n"
+        "💱 Цена — текущая цена пары — /price\n"
+        "📋 Позиции — открытые позиции — /open_orders\n"
+        "📈 Результаты — результаты торговли — /results\n"
+        "📐 Средняя — средняя цена покупки — /average\n"
+        "⚙️ Настройки — параметры торговли — /settings\n"
+        "🏷 Комиссия — настройка комиссии — /fee\n"
+        "🔑 API-ключи — привязать ключи MEXC — /set_api\n"
+        "💼 Демо-счёт — торговля на демо — /demo\n"
+        "ℹ️ Помощь — эта справка — /help",
+        reply_markup=main_menu_kb(),
     )
 
 

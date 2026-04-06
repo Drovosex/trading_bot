@@ -15,6 +15,16 @@ PING_INTERVAL = 20  # seconds
 MAX_RECONNECT_DELAY = 60
 
 
+def _ws_is_open(ws) -> bool:
+    """Check if WebSocket connection is open (compatible with websockets 13+ and 14+)."""
+    if hasattr(ws, "closed"):
+        return not ws.closed
+    # websockets 14+: check close_code
+    if hasattr(ws, "close_code"):
+        return ws.close_code is None
+    return True
+
+
 class MexcWebSocket:
     """Async WebSocket client for MEXC price monitoring.
 
@@ -29,7 +39,7 @@ class MexcWebSocket:
     ) -> None:
         self._symbols = symbols
         self._on_price_update = on_price_update
-        self._ws: websockets.WebSocketClientProtocol | None = None
+        self._ws = None
         self._running = False
         self._task: asyncio.Task | None = None
         self._reconnect_delay = 2
@@ -54,7 +64,13 @@ class MexcWebSocket:
     async def _run_loop(self) -> None:
         while self._running:
             try:
-                async with websockets.connect(WS_URL) as ws:
+                # Disable built-in ping — MEXC uses application-level pings
+                async with websockets.connect(
+                    WS_URL,
+                    ping_interval=None,
+                    ping_timeout=None,
+                    close_timeout=5,
+                ) as ws:
                     self._ws = ws
                     self._reconnect_delay = 2
                     self._consecutive_failures = 0
@@ -85,7 +101,7 @@ class MexcWebSocket:
                 log.error("ws_unexpected_error", error=str(e))
                 await asyncio.sleep(5)
 
-    async def _subscribe(self, ws: websockets.WebSocketClientProtocol) -> None:
+    async def _subscribe(self, ws) -> None:
         params = [
             f"spot@public.miniTicker.v3.api@{s}@UTC+0"
             for s in self._symbols
@@ -94,18 +110,18 @@ class MexcWebSocket:
         await ws.send(msg)
         log.info("ws_subscribed", channels=params)
 
-        # Start ping task
+        # Start application-level ping task
         asyncio.create_task(self._ping_loop(ws))
 
-    async def _ping_loop(self, ws: websockets.WebSocketClientProtocol) -> None:
+    async def _ping_loop(self, ws) -> None:
         try:
-            while self._running and not ws.closed:
+            while self._running and _ws_is_open(ws):
                 await ws.send(json.dumps({"method": "PING"}))
                 await asyncio.sleep(PING_INTERVAL)
         except (ConnectionClosed, asyncio.CancelledError):
             pass
 
-    async def _listen(self, ws: websockets.WebSocketClientProtocol) -> None:
+    async def _listen(self, ws) -> None:
         async for raw in ws:
             if not self._running:
                 break
@@ -131,7 +147,7 @@ class MexcWebSocket:
 
     @property
     def is_connected(self) -> bool:
-        return self._ws is not None and not self._ws.closed
+        return self._ws is not None and _ws_is_open(self._ws)
 
     @property
     def consecutive_failures(self) -> int:

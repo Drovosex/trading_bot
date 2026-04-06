@@ -7,7 +7,7 @@ import structlog
 from bot.db.database import Database
 from bot.db.models import Position, PositionStatus
 from bot.db import queries
-from bot.exchange.client import MexcClient, InsufficientBalance, MexcError
+from bot.exchange.client import MexcClient, InsufficientBalance, InvalidApiKey, MexcError
 from bot.exchange.models import OrderSide, OpenOrder
 from bot.trading.calculator import compute_sell_price
 from bot.utils.formatting import PAIR_QTY_PRECISION, PAIR_PRICE_PRECISION
@@ -109,6 +109,8 @@ class OrderManager:
 
         try:
             exchange_orders = await self._client.get_open_orders(symbol)
+        except InvalidApiKey:
+            raise  # Let engine handle auth failures
         except MexcError as e:
             log.warning("poll_orders_failed", error=str(e))
             return []

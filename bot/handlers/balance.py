@@ -19,7 +19,7 @@ router = Router()
 async def cmd_balance(
     message: Message, db: Database, vault: KeyVault, engines: dict
 ) -> None:
-    user_id = message.from_user.id  # type: ignore[union-attr]
+    user_id = message.chat.id
 
     user = await queries.get_user(db, user_id)
     if not user or not user.api_key_enc:
@@ -57,8 +57,8 @@ async def cmd_balance(
 
 
 @router.message(Command("open_orders"))
-async def cmd_open_orders(message: Message, db: Database) -> None:
-    user_id = message.from_user.id  # type: ignore[union-attr]
+async def cmd_open_orders(message: Message, db: Database, engines: dict) -> None:
+    user_id = message.chat.id
     positions = await queries.get_active_positions(db, user_id)
 
     if not positions:
@@ -68,11 +68,16 @@ async def cmd_open_orders(message: Message, db: Database) -> None:
     settings = await queries.get_settings(db, user_id)
     pair = settings.pair if settings else "BTCUSDC"
 
+    # Get active position ID from engine
+    engine = engines.get(user_id)
+    active_id = engine._active_position_id if engine else None
+
     lines = [f"📋 Открытые позиции ({len(positions)} шт.):\n"]
     for i, p in enumerate(positions, 1):
         base, quote = PAIR_INFO.get(p.pair, (p.pair[:3], p.pair[3:]))
+        active_mark = " 🔄" if p.id == active_id else ""
         lines.append(
-            f"{i}. {_fmt_qty(p.pair, p.buy_qty)} {base}\n"
+            f"{i}. {_fmt_qty(p.pair, p.buy_qty)} {base}{active_mark}\n"
             f"   Покупка: {_fmt_price(p.pair, p.buy_price)} {quote}\n"
             f"   Цель: {_fmt_price(p.pair, p.sell_target_price)} {quote}\n"
             f"   Стоимость: {p.buy_cost:.2f} {quote}\n"
@@ -83,7 +88,7 @@ async def cmd_open_orders(message: Message, db: Database) -> None:
 
 @router.message(Command("average"))
 async def cmd_average(message: Message, db: Database) -> None:
-    user_id = message.from_user.id  # type: ignore[union-attr]
+    user_id = message.chat.id
     positions = await queries.get_active_positions(db, user_id)
 
     if not positions:

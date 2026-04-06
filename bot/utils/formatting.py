@@ -6,6 +6,7 @@ PAIR_INFO: dict[str, tuple[str, str]] = {
     "KASUSDT": ("KAS", "USDT"),
     "XRPUSDT": ("XRP", "USDT"),
     "SOLUSDT": ("SOL", "USDT"),
+    "KASUSDC": ("KAS", "USDC"),
 }
 
 # Pair symbol → price decimal places for display
@@ -14,6 +15,7 @@ PAIR_PRICE_PRECISION: dict[str, int] = {
     "KASUSDT": 6,
     "XRPUSDT": 4,
     "SOLUSDT": 2,
+    "KASUSDC": 5,
 }
 
 # Pair symbol → quantity decimal places
@@ -22,7 +24,22 @@ PAIR_QTY_PRECISION: dict[str, int] = {
     "KASUSDT": 2,
     "XRPUSDT": 2,
     "SOLUSDT": 4,
+    "KASUSDC": 2,
 }
+
+
+def _fmt_money(value: float) -> str:
+    """Format money with adaptive precision: show enough decimals to avoid 0.00."""
+    abs_val = abs(value)
+    if abs_val == 0:
+        return "0.00"
+    if abs_val >= 0.01:
+        return f"{value:.2f}"
+    if abs_val >= 0.001:
+        return f"{value:.3f}"
+    if abs_val >= 0.0001:
+        return f"{value:.4f}"
+    return f"{value:.6f}"
 
 
 def _fmt_price(pair: str, price: float) -> str:
@@ -53,12 +70,12 @@ def format_buy(
     return (
         f"{prefix}"
         f"☑️ ПОКУПКА\n"
-        f"{_fmt_qty(pair, qty)} {base} за {cost:.2f} {quote}\n"
+        f"{_fmt_qty(pair, qty)} {base} за {_fmt_money(cost)} {quote}\n"
         f"по цене {_fmt_price(pair, price)} {quote}\n\n"
         f"🔜 Выставлено на продажу\n"
         f"по цене {_fmt_price(pair, sell_price)} {quote}\n\n"
         f"💲Ожидаемый доход\n"
-        f"{expected_income:.2f} {quote}"
+        f"{_fmt_money(expected_income)} {quote}"
     )
 
 
@@ -75,10 +92,10 @@ def format_sell(
     return (
         f"{prefix}"
         f"✅ ПРОДАЖА\n"
-        f"{_fmt_qty(pair, qty)} {base} за {revenue:.2f} {quote}\n"
+        f"{_fmt_qty(pair, qty)} {base} за {_fmt_money(revenue)} {quote}\n"
         f"по цене {_fmt_price(pair, price)} {quote}\n\n"
         f"💲 ДОХОД\n"
-        f"{profit:.2f} {quote}"
+        f"{_fmt_money(profit)} {quote}"
     )
 
 
@@ -144,7 +161,8 @@ def format_status(
     base, _ = _base_quote(pair)
 
     lines = [f"{icon} {state}\n"]
-    lines.append(f"• {base}/{quote}: {_fmt_price(pair, current_price)}\n")
+    if current_price > 0:
+        lines.append(f"• {base}/{quote}: {_fmt_price(pair, current_price)}\n")
 
     if is_running and (next_sell_price or next_drop_price):
         lines.append("• Условия новой покупки:")
@@ -159,7 +177,7 @@ def format_status(
 
     lines.append(f"• Свободные средства: {free_funds:.2f} {quote}\n/balance")
     lines.append(f"\n• Открытых позиций: {open_count} шт.\n/open_orders")
-    lines.append(f"\n• Прибыль за сегодня: {today_profit:.2f} {quote}\n/results")
+    lines.append(f"\n• Прибыль за сегодня: {_fmt_money(today_profit)} {quote}\n/results")
 
     return "\n".join(lines)
 
@@ -172,5 +190,5 @@ def format_daily_summary(
     return (
         f"📊 {date_str}\n\n"
         f"🔹 Кол-во закрытых позиций: {closed_count}\n"
-        f"🔹 Прибыль: {profit:.2f} {quote}"
+        f"🔹 Прибыль: {_fmt_money(profit)} {quote}"
     )

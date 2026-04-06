@@ -52,6 +52,7 @@ class MinNotional(MexcError):
 
 
 _ERROR_MAP: dict[int, type[MexcError]] = {
+    10072: InvalidApiKey,      # Api key info invalid
     10101: InsufficientBalance,
     30002: MinNotional,        # Below minimum trade amount
     429: RateLimited,
@@ -107,9 +108,20 @@ class MexcClient:
 
         url = f"{BASE_URL}{path}"
 
+        # MEXC requires all params in query string, even for POST/DELETE
+        # aiohttp sends "Content-Type: application/octet-stream" for empty POST
+        # which MEXC rejects with 700013 "Invalid content Type"
+        extra_kwargs: dict[str, Any] = {}
+        if method in ("POST", "DELETE"):
+            sep = "&" if "?" in url else "?"
+            query = "&".join(f"{k}={v}" for k, v in params.items())
+            url = f"{url}{sep}{query}"
+            params = None
+            extra_kwargs["headers"] = {"Content-Type": "application/json"}
+
         for attempt in range(3):
             try:
-                async with session.request(method, url, params=params) as resp:
+                async with session.request(method, url, params=params, **extra_kwargs) as resp:
                     data = await resp.json()
 
                     if resp.status == 429:
@@ -172,7 +184,37 @@ class MexcClient:
             "type": "MARKET",
             "quoteOrderQty": str(quote_qty),
         }, signed=True)
-        return OrderResult.from_dict(data, OrderSide.BUY)
+        result = OrderResult.from_dict(data, OrderSide.BUY)
+
+        # MEXC returns origQty=0 for market orders with quoteOrderQty.
+        # Get actual fill data from /myTrades endpoint.
+        if result.qty <= 0 and result.order_id:
+            for attempt in range(6):
+                await asyncio.sleep(0.5 * (attempt + 1))
+                try:
+                    trades = await self.get_my_trades(symbol, limit=5)
+                    # Find trades matching our order
+                    order_trades = [
+                        t for t in trades
+                        if str(t.get("orderId", "")) == result.order_id
+                        or str(t.get("id", "")).replace("X1", "").replace("X2", "") == result.order_id.replace("C02__", "")
+                    ]
+                    if order_trades:
+                        total_qty = sum(float(t["qty"]) for t in order_trades)
+                        total_cost = sum(float(t["quoteQty"]) for t in order_trades)
+                        avg_price = total_cost / total_qty if total_qty > 0 else 0
+                        result.qty = total_qty
+                        result.cost = total_cost
+                        result.price = avg_price
+                        result.status = OrderStatus.FILLED
+                        log.info("market_buy_filled_from_trades",
+                                 order_id=result.order_id, qty=total_qty, cost=total_cost)
+                        return result
+                except MexcError:
+                    pass
+            log.warning("market_buy_no_fill", order_id=result.order_id, raw=data)
+
+        return result
 
     async def place_limit_sell(
         self, symbol: str, qty: float, price: float
