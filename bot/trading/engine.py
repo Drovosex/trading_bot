@@ -8,7 +8,7 @@ import structlog
 from bot.db.database import Database
 from bot.db.models import Position, PositionStatus, TradingSettings
 from bot.db import queries
-from bot.exchange.client import MexcClient, InsufficientBalance, InvalidApiKey, MexcError
+from bot.exchange.client import MexcClient, InsufficientBalance, InvalidApiKey, MexcError, NetworkError
 from bot.exchange.websocket import MexcWebSocket
 from bot.trading.calculator import (
     compute_order_size,
@@ -36,6 +36,8 @@ POLL_INTERVAL_FEW = 5            # 1-5 positions
 POLL_INTERVAL_MANY = 3           # 6+ positions
 WS_FAILURE_NOTIFY_THRESHOLD = 5
 API_KEY_ERROR_LIMIT = 5          # Auto-stop after this many consecutive auth failures
+NETWORK_ERROR_LIMIT = 10         # Notify user after this many consecutive network errors
+NETWORK_BACKOFF_MAX = 60         # Max backoff seconds on network errors
 
 
 class TradingEngine:
@@ -72,6 +74,7 @@ class TradingEngine:
         # Drop-buy also replaces the active position.
         self._active_position_id: int | None = None
         self._consecutive_auth_errors: int = 0
+        self._consecutive_network_errors: int = 0
 
     # ─── Public API ──────────────────────────────────────────────────
 
@@ -167,6 +170,7 @@ class TradingEngine:
                         self.user_id, self.settings.pair, self.positions
                     )
                     self._consecutive_auth_errors = 0
+                    self._consecutive_network_errors = 0
                 except InvalidApiKey:
                     self._consecutive_auth_errors += 1
                     if self._consecutive_auth_errors >= API_KEY_ERROR_LIMIT:
@@ -179,6 +183,25 @@ class TradingEngine:
                             "Затем запустите торговлю заново."
                         )
                         break
+                    continue
+                except NetworkError as e:
+                    self._consecutive_network_errors += 1
+                    backoff = min(
+                        self._consecutive_network_errors * 5,
+                        NETWORK_BACKOFF_MAX,
+                    )
+                    log.warning("network_error",
+                                error=str(e),
+                                consecutive=self._consecutive_network_errors,
+                                backoff=backoff)
+                    if self._consecutive_network_errors == NETWORK_ERROR_LIMIT:
+                        await self._send(
+                            "⚠️ Проблемы с сетью, алгоритм продолжает работу...\n"
+                            "Попытка переподключения."
+                        )
+                        # Recreate HTTP session to clear stale connections
+                        await self._client.close()
+                    await asyncio.sleep(backoff)
                     continue
                 except MexcError:
                     continue
@@ -389,6 +412,8 @@ class TradingEngine:
                         self.current_price = price
                 except MexcError:
                     pass
+                except Exception:
+                    pass  # Network errors — WS is primary, REST is just fallback
         except asyncio.CancelledError:
             pass
 

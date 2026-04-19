@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 import structlog
-from aiohttp import ClientSession
+from aiohttp import ClientSession, ClientTimeout
 
 from bot.exchange.models import (
     AccountBalance,
@@ -51,6 +51,11 @@ class MinNotional(MexcError):
     pass
 
 
+class NetworkError(MexcError):
+    """Timeout or connectivity issue — retryable."""
+    pass
+
+
 _ERROR_MAP: dict[int, type[MexcError]] = {
     10072: InvalidApiKey,      # Api key info invalid
     10101: InsufficientBalance,
@@ -79,7 +84,8 @@ class MexcClient:
     async def _get_session(self) -> ClientSession:
         if self._session is None or self._session.closed:
             self._session = ClientSession(
-                headers={"X-MEXC-APIKEY": self._api_key}
+                headers={"X-MEXC-APIKEY": self._api_key},
+                timeout=ClientTimeout(total=30, connect=10),
             )
         return self._session
 
@@ -141,9 +147,9 @@ class MexcClient:
                     log.warning("request_retry", error=str(e), attempt=attempt)
                     await asyncio.sleep(2)
                     continue
-                raise
+                raise NetworkError(0, f"Network error: {e}")
 
-        raise MexcError(0, "Max retries exceeded")
+        raise NetworkError(0, "Max retries exceeded")
 
     # ─── Market Data (public) ─────────────────────────────────────────
 
