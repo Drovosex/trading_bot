@@ -32,10 +32,12 @@ class TradingSettings:
     pair: str = "BTCUSDC"
     order_type: OrderType = OrderType.DYNAMIC
     order_param: float = 2.0       # % of capital (dynamic) or USDT amount (fixed)
-    profit_pct: float = 0.7
-    drop_pct: float = 0.6
+    profit_pct: float = 0.3
+    drop_pct: float = 1.0
     maker_fee: float = 0.0
     taker_fee: float = 0.05
+    auto_buy_interval: int = 30    # Seconds between sell of active order and next buy (1-60)
+    drop_buy_enabled: bool = True  # Enable drop-based additional buys
 
 
 @dataclass

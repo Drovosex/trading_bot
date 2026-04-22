@@ -63,6 +63,8 @@ async def get_settings(db: Database, user_id: int) -> TradingSettings | None:
     if not rows:
         return None
     r = rows[0]
+    # Safely read new columns (fallback for older DBs until migration runs)
+    keys = r.keys()
     return TradingSettings(
         user_id=r["user_id"],
         pair=r["pair"],
@@ -72,22 +74,28 @@ async def get_settings(db: Database, user_id: int) -> TradingSettings | None:
         drop_pct=r["drop_pct"],
         maker_fee=r["maker_fee"],
         taker_fee=r["taker_fee"],
+        auto_buy_interval=r["auto_buy_interval"] if "auto_buy_interval" in keys else 30,
+        drop_buy_enabled=bool(r["drop_buy_enabled"]) if "drop_buy_enabled" in keys else True,
     )
 
 
 async def upsert_settings(db: Database, s: TradingSettings) -> None:
     await db.db.execute(
         """INSERT INTO trading_settings
-           (user_id, pair, order_type, order_param, profit_pct, drop_pct, maker_fee, taker_fee)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           (user_id, pair, order_type, order_param, profit_pct, drop_pct,
+            maker_fee, taker_fee, auto_buy_interval, drop_buy_enabled)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(user_id) DO UPDATE SET
                pair=excluded.pair, order_type=excluded.order_type,
                order_param=excluded.order_param, profit_pct=excluded.profit_pct,
                drop_pct=excluded.drop_pct, maker_fee=excluded.maker_fee,
-               taker_fee=excluded.taker_fee""",
+               taker_fee=excluded.taker_fee,
+               auto_buy_interval=excluded.auto_buy_interval,
+               drop_buy_enabled=excluded.drop_buy_enabled""",
         (
             s.user_id, s.pair, s.order_type.value, s.order_param,
             s.profit_pct, s.drop_pct, s.maker_fee, s.taker_fee,
+            s.auto_buy_interval, int(s.drop_buy_enabled),
         ),
     )
     await db.db.commit()

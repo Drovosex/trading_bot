@@ -61,15 +61,32 @@ def positions_page_kb(page: int, total_pages: int) -> InlineKeyboardMarkup:
 
 # ─── Settings keyboards ─────────────────────────────────────────────────────
 
-def settings_main_kb() -> InlineKeyboardMarkup:
+def settings_main_kb(drop_buy_enabled: bool = True) -> InlineKeyboardMarkup:
+    drop_buy_label = (
+        "🔄 Автопокупка при падении: ВКЛ"
+        if drop_buy_enabled
+        else "🔄 Автопокупка при падении: ВЫКЛ"
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💱 Торговая пара", callback_data="set_pair")],
         [InlineKeyboardButton(text="📦 Тип ордера", callback_data="set_order_type")],
         [InlineKeyboardButton(text="💵 Размер ордера", callback_data="set_order_size")],
         [InlineKeyboardButton(text="📈 Процент прибыли", callback_data="set_profit_pct")],
         [InlineKeyboardButton(text="📉 Процент снижения", callback_data="set_drop_pct")],
+        [InlineKeyboardButton(text="⏱ Интервал автопокупки", callback_data="set_auto_buy_interval")],
+        [InlineKeyboardButton(text=drop_buy_label, callback_data="toggle_drop_buy")],
         [InlineKeyboardButton(text="🏷 Комиссия", callback_data="set_fee")],
+        [InlineKeyboardButton(text="♻️ Сброс настроек", callback_data="reset_settings_prompt")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_back")],
+    ])
+
+
+def reset_settings_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, сбросить", callback_data="reset_settings_confirm"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_settings"),
+        ],
     ])
 
 

@@ -10,7 +10,10 @@ from bot.config import settings as app_settings
 from bot.db.database import Database
 from bot.db import queries
 from bot.db.models import OrderType, TradingSettings
-from bot.keyboards.inline import settings_main_kb, pair_select_kb, order_type_kb, cancel_input_kb
+from bot.keyboards.inline import (
+    settings_main_kb, pair_select_kb, order_type_kb,
+    cancel_input_kb, reset_settings_confirm_kb,
+)
 from bot.trading.calculator import compute_order_size
 from bot.utils.formatting import PAIR_INFO
 
@@ -22,6 +25,18 @@ class SettingsStates(StatesGroup):
     waiting_profit_pct = State()
     waiting_drop_pct = State()
     waiting_dynamic_pct = State()
+    waiting_auto_buy_interval = State()
+
+
+# Default settings applied on reset
+RESET_DEFAULTS = {
+    "order_type": OrderType.DYNAMIC,
+    "order_param": 2.0,
+    "profit_pct": 0.3,
+    "drop_pct": 1.0,
+    "auto_buy_interval": 30,
+    "drop_buy_enabled": True,
+}
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -71,7 +86,7 @@ async def cmd_settings(message: Message, db: Database) -> None:
         return
 
     text = _settings_text(s)
-    await message.answer(text, reply_markup=settings_main_kb())
+    await message.answer(text, reply_markup=settings_main_kb(s.drop_buy_enabled))
 
 
 def _settings_text(s: TradingSettings) -> str:
@@ -81,12 +96,15 @@ def _settings_text(s: TradingSettings) -> str:
         if s.order_type == OrderType.DYNAMIC
         else f"{s.order_param} {quote} (фиксированный)"
     )
+    drop_buy_label = "ВКЛ" if s.drop_buy_enabled else "ВЫКЛ"
     return (
         f"⚙️ Выберите параметр для изменения\n\n"
         f"• Пара: {base}/{quote}\n"
         f"• Ордер: {order_desc}\n"
         f"• Прибыль: {s.profit_pct}%\n"
-        f"• Снижение: {s.drop_pct}%"
+        f"• Снижение: {s.drop_pct}%\n"
+        f"• Интервал автопокупки: {s.auto_buy_interval} сек.\n"
+        f"• Автопокупка при падении: {drop_buy_label}"
     )
 
 
@@ -126,7 +144,7 @@ async def cb_pair_selected(callback: CallbackQuery, db: Database) -> None:
         await callback.message.edit_text(  # type: ignore
             f"✅ Пара изменена на {new_base}/{new_quote}\n"
             f"Параметры установлены по умолчанию.",
-            reply_markup=settings_main_kb(),
+            reply_markup=settings_main_kb(s.drop_buy_enabled),
         )
     except Exception:
         pass
@@ -342,3 +360,131 @@ async def process_drop_pct(message: Message, state: FSMContext, db: Database, en
             engine.settings.drop_pct = value
 
     await state.clear()
+
+
+# ─── Auto-buy interval ───────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "set_auto_buy_interval")
+async def cb_set_auto_buy_interval(callback: CallbackQuery, state: FSMContext) -> None:
+    text = "Введите интервал автопокупки в секундах\n(от 1 до 60):"
+    await state.set_state(SettingsStates.waiting_auto_buy_interval)
+    try:
+        await callback.message.edit_text(text, reply_markup=cancel_input_kb())  # type: ignore
+        await _save_prompt_id(state, callback.message.message_id)
+    except Exception:
+        sent = await callback.message.answer(text, reply_markup=cancel_input_kb())  # type: ignore
+        await _save_prompt_id(state, sent.message_id)
+    await callback.answer()
+
+
+@router.message(SettingsStates.waiting_auto_buy_interval)
+async def process_auto_buy_interval(
+    message: Message, state: FSMContext, db: Database, engines: dict
+) -> None:
+    user_id = message.chat.id
+    try:
+        value = int(message.text.strip())  # type: ignore
+    except (ValueError, AttributeError):
+        await message.answer("❌ Введите целое число от 1 до 60:", reply_markup=cancel_input_kb())
+        return
+
+    if value < 1 or value > 60:
+        await message.answer("❌ Значение должно быть от 1 до 60:", reply_markup=cancel_input_kb())
+        return
+
+    await _cleanup(message, state)
+
+    s = await queries.get_settings(db, user_id)
+    if s:
+        s.auto_buy_interval = value
+        await queries.upsert_settings(db, s)
+        await message.answer(f"✅ Интервал автопокупки изменён на {value} сек.")
+
+        engine = engines.get(user_id) if engines else None
+        if engine:
+            engine.settings.auto_buy_interval = value
+
+    await state.clear()
+
+
+# ─── Toggle drop-buy ─────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "toggle_drop_buy")
+async def cb_toggle_drop_buy(callback: CallbackQuery, db: Database, engines: dict) -> None:
+    user_id = callback.from_user.id
+    s = await queries.get_settings(db, user_id)
+    if not s:
+        await callback.answer("Ошибка")
+        return
+
+    s.drop_buy_enabled = not s.drop_buy_enabled
+    await queries.upsert_settings(db, s)
+
+    engine = engines.get(user_id) if engines else None
+    if engine:
+        engine.settings.drop_buy_enabled = s.drop_buy_enabled
+
+    state_label = "включена" if s.drop_buy_enabled else "отключена"
+    await callback.answer(f"Автопокупка при падении {state_label}")
+    try:
+        await callback.message.edit_text(  # type: ignore
+            _settings_text(s),
+            reply_markup=settings_main_kb(s.drop_buy_enabled),
+        )
+    except Exception:
+        pass
+
+
+# ─── Reset settings ──────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "reset_settings_prompt")
+async def cb_reset_settings_prompt(callback: CallbackQuery) -> None:
+    text = (
+        "♻️ Сбросить настройки на значения по умолчанию?\n\n"
+        "• Тип ордера: Динамический 2%\n"
+        "• Процент прибыли: 0.3%\n"
+        "• Процент снижения: 1%\n"
+        "• Интервал автопокупки: 30 сек.\n"
+        "• Автопокупка при падении: ВКЛ\n\n"
+        "Торговая пара и комиссии останутся без изменений."
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=reset_settings_confirm_kb())  # type: ignore
+    except Exception:
+        await callback.message.answer(text, reply_markup=reset_settings_confirm_kb())  # type: ignore
+    await callback.answer()
+
+
+@router.callback_query(F.data == "reset_settings_confirm")
+async def cb_reset_settings_confirm(callback: CallbackQuery, db: Database, engines: dict) -> None:
+    user_id = callback.from_user.id
+    s = await queries.get_settings(db, user_id)
+    if not s:
+        await callback.answer("Ошибка")
+        return
+
+    s.order_type = RESET_DEFAULTS["order_type"]  # type: ignore
+    s.order_param = RESET_DEFAULTS["order_param"]  # type: ignore
+    s.profit_pct = RESET_DEFAULTS["profit_pct"]  # type: ignore
+    s.drop_pct = RESET_DEFAULTS["drop_pct"]  # type: ignore
+    s.auto_buy_interval = RESET_DEFAULTS["auto_buy_interval"]  # type: ignore
+    s.drop_buy_enabled = RESET_DEFAULTS["drop_buy_enabled"]  # type: ignore
+    await queries.upsert_settings(db, s)
+
+    engine = engines.get(user_id) if engines else None
+    if engine:
+        engine.settings.order_type = s.order_type
+        engine.settings.order_param = s.order_param
+        engine.settings.profit_pct = s.profit_pct
+        engine.settings.drop_pct = s.drop_pct
+        engine.settings.auto_buy_interval = s.auto_buy_interval
+        engine.settings.drop_buy_enabled = s.drop_buy_enabled
+
+    await callback.answer("Настройки сброшены")
+    try:
+        await callback.message.edit_text(  # type: ignore
+            "✅ Настройки сброшены на значения по умолчанию\n\n" + _settings_text(s),
+            reply_markup=settings_main_kb(s.drop_buy_enabled),
+        )
+    except Exception:
+        pass

@@ -220,10 +220,16 @@ class TradingEngine:
                         if pos.id == self._active_position_id:
                             log.info("active_sell_filled", position_id=pos.id)
                             self._active_position_id = None
+                            # Delay before re-buying (user-configurable)
+                            delay = max(1, min(60, self.settings.auto_buy_interval))
+                            log.info("auto_buy_delay", seconds=delay)
+                            await asyncio.sleep(delay)
+                            if self.state != EngineState.RUNNING:
+                                break
                             await self._try_buy()
 
                 # Check for price-drop buy trigger (replaces active position)
-                if self.current_price > 0:
+                if self.current_price > 0 and self.settings.drop_buy_enabled:
                     await self._check_drop_buy()
 
         except asyncio.CancelledError:

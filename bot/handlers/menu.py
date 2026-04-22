@@ -99,7 +99,7 @@ async def menu_settings(message: Message, db: Database) -> None:
         return
 
     from bot.handlers.settings import _settings_text
-    await _send_menu(message, _settings_text(s), settings_main_kb())
+    await _send_menu(message, _settings_text(s), settings_main_kb(s.drop_buy_enabled))
 
 
 @router.message(F.text == BTN_HELP)
@@ -156,7 +156,7 @@ async def cb_back_to_settings(callback: CallbackQuery, db: Database) -> None:
 
     from bot.handlers.settings import _settings_text
     await callback.answer()
-    await _edit_to_menu(callback, _settings_text(s), settings_main_kb())
+    await _edit_to_menu(callback, _settings_text(s), settings_main_kb(s.drop_buy_enabled))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

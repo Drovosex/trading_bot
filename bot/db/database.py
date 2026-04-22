@@ -20,10 +20,12 @@ CREATE TABLE IF NOT EXISTS trading_settings (
     pair TEXT NOT NULL DEFAULT 'BTCUSDC',
     order_type TEXT NOT NULL DEFAULT 'dynamic',
     order_param REAL NOT NULL DEFAULT 2.0,
-    profit_pct REAL NOT NULL DEFAULT 0.7,
-    drop_pct REAL NOT NULL DEFAULT 0.6,
+    profit_pct REAL NOT NULL DEFAULT 0.3,
+    drop_pct REAL NOT NULL DEFAULT 1.0,
     maker_fee REAL NOT NULL DEFAULT 0.0,
-    taker_fee REAL NOT NULL DEFAULT 0.05
+    taker_fee REAL NOT NULL DEFAULT 0.05,
+    auto_buy_interval INTEGER NOT NULL DEFAULT 30,
+    drop_buy_enabled INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS positions (
@@ -90,7 +92,24 @@ class Database:
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA busy_timeout=5000")
         await self._db.executescript(_SCHEMA)
+        await self._migrate()
         await self._db.commit()
+
+    async def _migrate(self) -> None:
+        """Add new columns to trading_settings for older DBs."""
+        assert self._db is not None
+        cursor = await self._db.execute("PRAGMA table_info(trading_settings)")
+        columns = {row["name"] for row in await cursor.fetchall()}
+        if "auto_buy_interval" not in columns:
+            await self._db.execute(
+                "ALTER TABLE trading_settings "
+                "ADD COLUMN auto_buy_interval INTEGER NOT NULL DEFAULT 30"
+            )
+        if "drop_buy_enabled" not in columns:
+            await self._db.execute(
+                "ALTER TABLE trading_settings "
+                "ADD COLUMN drop_buy_enabled INTEGER NOT NULL DEFAULT 1"
+            )
 
     async def close(self) -> None:
         if self._db:
