@@ -75,6 +75,10 @@ class TradingEngine:
         self._active_position_id: int | None = None
         self._consecutive_auth_errors: int = 0
         self._consecutive_network_errors: int = 0
+        # Price at which last buy attempt failed due to insufficient funds.
+        # Drop-buy won't trigger again until price drops FURTHER from this level.
+        # Reset when a sell fills (balance freed up).
+        self._no_funds_price: float | None = None
 
     # ─── Public API ──────────────────────────────────────────────────
 
@@ -209,6 +213,8 @@ class TradingEngine:
                     for pos in closed:
                         self.positions.remove(pos)
                         await self._notify_sell(pos)
+                        # Sell freed up balance — allow new buys
+                        self._no_funds_price = None
 
                         # Only the ACTIVE position triggers a new buy
                         if pos.id == self._active_position_id:
@@ -277,20 +283,26 @@ class TradingEngine:
         try:
             size = compute_order_size(self.settings, free, capital)
         except OrderTooSmall as e:
-            order_type_label = "динамический" if self.settings.order_type.value == "dynamic" else "фиксированный"
-            await self._send(
-                f"⚠️ Размер ордера слишком мал\n\n"
-                f"Тип: {order_type_label}, параметр: {self.settings.order_param}\n"
-                f"Рассчитанный размер: {e.computed:.2f} {quote_asset}\n"
-                f"Минимум биржи: {e.minimum:.2f} {quote_asset}\n\n"
-                f"💡 Увеличьте размер ордера через /settings\n"
-                f"или переключитесь на фиксированный ордер."
-            )
+            # Only notify once — until a sell fills and frees up balance
+            if self._no_funds_price is None:
+                order_type_label = "динамический" if self.settings.order_type.value == "dynamic" else "фиксированный"
+                await self._send(
+                    f"⚠️ Размер ордера слишком мал\n\n"
+                    f"Тип: {order_type_label}, параметр: {self.settings.order_param}\n"
+                    f"Рассчитанный размер: {e.computed:.2f} {quote_asset}\n"
+                    f"Минимум биржи: {e.minimum:.2f} {quote_asset}\n\n"
+                    f"💡 Увеличьте размер ордера через /settings\n"
+                    f"или переключитесь на фиксированный ордер."
+                )
+            self._no_funds_price = self.current_price
             return
         if size is None:
-            await self._send(
-                format_insufficient_funds(free, self.settings.order_param, quote_asset)
-            )
+            # Only notify once — until a sell fills and frees up balance
+            if self._no_funds_price is None:
+                await self._send(
+                    format_insufficient_funds(free, self.settings.order_param, quote_asset)
+                )
+            self._no_funds_price = self.current_price
             return
 
         position = await self._order_manager.execute_buy(
@@ -299,6 +311,7 @@ class TradingEngine:
         if position:
             self.positions.append(position)
             self._last_buy_check_price = position.buy_price
+            self._no_funds_price = None  # Funds available — reset flag
             # This position becomes the active one
             self._active_position_id = position.id
             log.info("active_position_set", position_id=position.id)
@@ -315,6 +328,15 @@ class TradingEngine:
             self.current_price, self.positions, self.settings
         ):
             return
+
+        # If last buy failed due to no funds, only retry when price drops further
+        # (another drop_pct below the price where we failed)
+        if self._no_funds_price is not None:
+            next_retry_price = compute_drop_price(self._no_funds_price, self.settings.drop_pct)
+            if self.current_price > next_retry_price:
+                return  # Price hasn't dropped enough since last failed attempt
+            # Price dropped further — reset flag and try again
+            self._no_funds_price = None
 
         # Notify price drop
         last_price = self._strategy.get_last_buy_price(self.positions)
@@ -341,6 +363,7 @@ class TradingEngine:
             return
 
         exchange_ids = {o.order_id for o in exchange_orders}
+        reconciled: list[Position] = []
 
         for pos in list(self.positions):
             if pos.status == PositionStatus.SELLING and pos.sell_order_id:
@@ -350,8 +373,18 @@ class TradingEngine:
                     profit = revenue - pos.buy_cost
                     await queries.close_position(self._db, pos.id, revenue, profit)  # type: ignore
                     pos.status = PositionStatus.CLOSED
+                    pos.sell_revenue = revenue
+                    pos.profit = profit
                     self.positions.remove(pos)
+                    reconciled.append(pos)
                     log.info("reconciled_closed", position_id=pos.id)
+
+        # Notify about positions filled while bot was offline
+        if reconciled:
+            header = f"📋 Закрыто пока бот был остановлен: {len(reconciled)} позиц.\n\n"
+            await self._send(header)
+            for pos in reconciled:
+                await self._notify_sell(pos)
 
     # ─── Notifications ───────────────────────────────────────────────
 
