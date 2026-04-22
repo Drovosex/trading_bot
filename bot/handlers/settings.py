@@ -86,26 +86,11 @@ async def cmd_settings(message: Message, db: Database) -> None:
         return
 
     text = _settings_text(s)
-    await message.answer(text, reply_markup=settings_main_kb(s.drop_buy_enabled))
+    await message.answer(text, reply_markup=settings_main_kb(s))
 
 
 def _settings_text(s: TradingSettings) -> str:
-    base, quote = PAIR_INFO.get(s.pair, (s.pair[:3], s.pair[3:]))
-    order_desc = (
-        f"{s.order_param}% от капитала (динамический)"
-        if s.order_type == OrderType.DYNAMIC
-        else f"{s.order_param} {quote} (фиксированный)"
-    )
-    drop_buy_label = "ВКЛ" if s.drop_buy_enabled else "ВЫКЛ"
-    return (
-        f"⚙️ Выберите параметр для изменения\n\n"
-        f"• Пара: {base}/{quote}\n"
-        f"• Ордер: {order_desc}\n"
-        f"• Прибыль: {s.profit_pct}%\n"
-        f"• Снижение: {s.drop_pct}%\n"
-        f"• Интервал автопокупки: {s.auto_buy_interval} сек.\n"
-        f"• Автопокупка при падении: {drop_buy_label}"
-    )
+    return "⚙️ Настройки — нажмите на параметр для изменения"
 
 
 # ─── Pair selection ───────────────────────────────────────────────────────────
@@ -144,7 +129,7 @@ async def cb_pair_selected(callback: CallbackQuery, db: Database) -> None:
         await callback.message.edit_text(  # type: ignore
             f"✅ Пара изменена на {new_base}/{new_quote}\n"
             f"Параметры установлены по умолчанию.",
-            reply_markup=settings_main_kb(s.drop_buy_enabled),
+            reply_markup=settings_main_kb(s),
         )
     except Exception:
         pass
@@ -429,7 +414,7 @@ async def cb_toggle_drop_buy(callback: CallbackQuery, db: Database, engines: dic
     try:
         await callback.message.edit_text(  # type: ignore
             _settings_text(s),
-            reply_markup=settings_main_kb(s.drop_buy_enabled),
+            reply_markup=settings_main_kb(s),
         )
     except Exception:
         pass
@@ -484,7 +469,7 @@ async def cb_reset_settings_confirm(callback: CallbackQuery, db: Database, engin
     try:
         await callback.message.edit_text(  # type: ignore
             "✅ Настройки сброшены на значения по умолчанию\n\n" + _settings_text(s),
-            reply_markup=settings_main_kb(s.drop_buy_enabled),
+            reply_markup=settings_main_kb(s),
         )
     except Exception:
         pass
