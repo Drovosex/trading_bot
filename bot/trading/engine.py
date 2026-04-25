@@ -26,6 +26,8 @@ from bot.utils.formatting import (
     format_price_drop,
     format_insufficient_funds,
     PAIR_INFO,
+    _fmt_price,
+    _fmt_qty,
 )
 
 log = structlog.get_logger()
@@ -92,10 +94,17 @@ class TradingEngine:
         # Load active positions from DB (crash recovery)
         self.positions = await queries.get_active_positions(self._db, self.user_id)
 
-        # The last position is the active one (most recent buy)
+        # Pick the position with the LOWEST sell target price as active —
+        # it will sell first and trigger the next buy. This avoids opening
+        # a fresh position on every restart when we already have open ones.
         if self.positions:
-            self._active_position_id = self.positions[-1].id
-            log.info("active_position_restored", position_id=self._active_position_id)
+            active_pos = min(self.positions, key=lambda p: p.sell_target_price)
+            self._active_position_id = active_pos.id
+            log.info(
+                "active_position_restored",
+                position_id=active_pos.id,
+                sell_price=active_pos.sell_target_price,
+            )
 
         # Reconcile with exchange
         await self._reconcile()
@@ -154,8 +163,27 @@ class TradingEngine:
 
     async def _main_loop(self) -> None:
         try:
-            # Initial buy on start — becomes the active position
-            await self._try_buy()
+            # Initial buy on start — only if there are no open positions.
+            # If positions already exist, the one with the lowest sell price
+            # was made active in start(); we wait for it to sell instead of
+            # opening yet another position.
+            if not self.positions:
+                await self._try_buy()
+            else:
+                active_pos = next(
+                    (p for p in self.positions if p.id == self._active_position_id),
+                    None,
+                )
+                if active_pos:
+                    base, quote = PAIR_INFO.get(
+                        active_pos.pair, (active_pos.pair[:3], active_pos.pair[3:])
+                    )
+                    await self._send(
+                        f"🔄 Активный ордер: продажа "
+                        f"{_fmt_qty(active_pos.pair, active_pos.buy_qty)} {base} "
+                        f"по {_fmt_price(active_pos.pair, active_pos.sell_target_price)} {quote}\n"
+                        f"Новой покупки не будет — ждём исполнения."
+                    )
 
             while self.state == EngineState.RUNNING:
                 poll_interval = self._get_poll_interval()
