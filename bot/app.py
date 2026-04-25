@@ -7,6 +7,7 @@ import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError
 
 from bot.config import settings
 from bot.db.database import Database
@@ -73,4 +74,25 @@ async def main() -> None:
     dp.shutdown.register(on_shutdown)
 
     log.info("bot_starting")
-    await dp.start_polling(bot)
+
+    # Resilient polling: if Telegram API is temporarily unreachable
+    # (network blip, IP routing issue), retry with exponential backoff
+    # instead of letting the process crash and rely on systemd restart loop.
+    backoff = 5
+    BACKOFF_MAX = 300
+    while True:
+        try:
+            await dp.start_polling(bot)
+            # Clean exit (e.g. SIGTERM) — stop the loop
+            break
+        except TelegramNetworkError as e:
+            log.warning(
+                "telegram_network_error_retrying",
+                error=str(e),
+                backoff_sec=backoff,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, BACKOFF_MAX)
+        except Exception:
+            log.exception("polling_crashed")
+            raise
