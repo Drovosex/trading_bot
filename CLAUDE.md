@@ -92,16 +92,16 @@ Schema (`trading_settings` table) — auto-migrated via `PRAGMA table_info` on s
 - `/set_api` has confirmation dialog if keys already exist
 
 ## Deployment
-- VPS: `vps_new` (REDACTED_IP), 1 CPU / 1 GB RAM
+- VPS: SSH alias `vps_new`, 1 CPU / 1 GB RAM (IP in `CLAUDE.local.md`)
 - systemd service: `trading-bot` at `/opt/trading_bot/`
 - Python venv: `/opt/trading_bot/.venv/`
 - DB: `/opt/trading_bot/data/bot.db`
 - Deploy: `scp` files → `systemctl restart trading-bot`
 - **journald limit**: 50MB (configured in `/etc/systemd/journald.conf`) to prevent memory pressure on 1GB VPS
 
-## Important IDs
-- Bot: `@REDACTED_BOT` (id: REDACTED_BOT_ID)
-- Admin user_id: REDACTED_USER_ID
+## Local-only context
+Bot username, admin Telegram ID and VPS IP are stored in `CLAUDE.local.md`
+(gitignored). Read it when those values are needed.
 
 ## Conventions
 - Use `message.chat.id` (not `message.from_user.id`) in callback handlers — `callback.message.from_user` is the bot
