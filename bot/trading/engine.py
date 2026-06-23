@@ -40,6 +40,8 @@ WS_FAILURE_NOTIFY_THRESHOLD = 5
 API_KEY_ERROR_LIMIT = 5          # Auto-stop after this many consecutive auth failures
 NETWORK_ERROR_LIMIT = 10         # Notify user after this many consecutive network errors
 NETWORK_BACKOFF_MAX = 60         # Max backoff seconds on network errors
+UNKNOWN_ERROR_LIMIT = 20         # Auto-stop after this many consecutive unexpected errors
+UNKNOWN_ERROR_SLEEP = 5          # Sleep between recovery attempts
 
 
 class TradingEngine:
@@ -61,7 +63,20 @@ class TradingEngine:
         self.settings = settings
         self._client = client
         self._db = db
-        self._send = send_message
+
+        # Wrap send_message: a TelegramNetworkError raised while sending
+        # a notification must NEVER take down the trading loop. Best-effort
+        # delivery — drop the message and log a warning if it fails.
+        async def _safe_send(text: str) -> None:
+            try:
+                await send_message(text)
+            except Exception as e:
+                log.warning(
+                    "telegram_send_failed",
+                    user_id=user_id,
+                    error=str(e),
+                )
+        self._send = _safe_send
 
         self._strategy = ScalpStrategy()
         self._order_manager = OrderManager(client, db)
@@ -81,6 +96,9 @@ class TradingEngine:
         # Drop-buy won't trigger again until price drops FURTHER from this level.
         # Reset when a sell fills (balance freed up).
         self._no_funds_price: float | None = None
+        # True once we've notified the user about ongoing WS failures.
+        # Reset when WS reconnects, so the next outage notifies again.
+        self._ws_failure_notified: bool = False
 
     # ─── Public API ──────────────────────────────────────────────────
 
@@ -185,6 +203,7 @@ class TradingEngine:
                         f"Новой покупки не будет — ждём исполнения."
                     )
 
+            consecutive_unknown = 0
             while self.state == EngineState.RUNNING:
                 poll_interval = self._get_poll_interval()
                 await asyncio.sleep(poll_interval)
@@ -192,82 +211,122 @@ class TradingEngine:
                 if self.state != EngineState.RUNNING:
                     break
 
-                # Check WS health
-                if self._ws and self._ws.consecutive_failures >= WS_FAILURE_NOTIFY_THRESHOLD:
-                    await self._send("⚠️ Проблемы с подключением к бирже. Проверяю...")
-
-                # Check sell fills
                 try:
-                    closed = await self._order_manager.check_sell_fills(
-                        self.user_id, self.settings.pair, self.positions
+                    iteration_ok = await self._loop_iteration()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    consecutive_unknown += 1
+                    log.exception(
+                        "engine_iteration_failed",
+                        user_id=self.user_id,
+                        error=str(e),
+                        consecutive=consecutive_unknown,
                     )
-                    self._consecutive_auth_errors = 0
-                    self._consecutive_network_errors = 0
-                except InvalidApiKey:
-                    self._consecutive_auth_errors += 1
-                    if self._consecutive_auth_errors >= API_KEY_ERROR_LIMIT:
-                        log.error("api_key_invalid_auto_stop", user_id=self.user_id,
-                                  errors=self._consecutive_auth_errors)
+                    if consecutive_unknown >= UNKNOWN_ERROR_LIMIT:
                         await self._send(
-                            "🔴 Алгоритм остановлен\n\n"
-                            "API ключи недействительны.\n"
-                            "Обновите ключи: /set_api\n"
-                            "Затем запустите торговлю заново."
+                            f"🔴 Алгоритм остановлен\n\n"
+                            f"Множественные неожиданные ошибки ({consecutive_unknown}).\n"
+                            f"Последняя: {e}"
                         )
                         break
-                    continue
-                except NetworkError as e:
-                    self._consecutive_network_errors += 1
-                    backoff = min(
-                        self._consecutive_network_errors * 5,
-                        NETWORK_BACKOFF_MAX,
-                    )
-                    log.warning("network_error",
-                                error=str(e),
-                                consecutive=self._consecutive_network_errors,
-                                backoff=backoff)
-                    if self._consecutive_network_errors == NETWORK_ERROR_LIMIT:
-                        await self._send(
-                            "⚠️ Проблемы с сетью, алгоритм продолжает работу...\n"
-                            "Попытка переподключения."
-                        )
-                        # Recreate HTTP session to clear stale connections
-                        await self._client.close()
-                    await asyncio.sleep(backoff)
-                    continue
-                except MexcError:
+                    await asyncio.sleep(UNKNOWN_ERROR_SLEEP)
                     continue
                 else:
-                    for pos in closed:
-                        self.positions.remove(pos)
-                        await self._notify_sell(pos)
-                        # Sell freed up balance — allow new buys
-                        self._no_funds_price = None
-
-                        # Only the ACTIVE position triggers a new buy
-                        if pos.id == self._active_position_id:
-                            log.info("active_sell_filled", position_id=pos.id)
-                            self._active_position_id = None
-                            # Delay before re-buying (user-configurable)
-                            delay = max(1, min(60, self.settings.auto_buy_interval))
-                            log.info("auto_buy_delay", seconds=delay)
-                            await asyncio.sleep(delay)
-                            if self.state != EngineState.RUNNING:
-                                break
-                            await self._try_buy()
-
-                # Check for price-drop buy trigger (replaces active position)
-                if self.current_price > 0 and self.settings.drop_buy_enabled:
-                    await self._check_drop_buy()
+                    consecutive_unknown = 0
+                    if iteration_ok is False:
+                        # Iteration explicitly requested loop exit (auth limit)
+                        break
 
         except asyncio.CancelledError:
             return
         except Exception as e:
-            log.error("engine_error", user_id=self.user_id, error=str(e))
-            await self._send(f"⚠️ Ошибка торгового алгоритма: {e}\nАлгоритм остановлен.")
+            log.exception("engine_setup_failed", user_id=self.user_id, error=str(e))
+            await self._send(
+                f"⚠️ Ошибка торгового алгоритма: {e}\nАлгоритм остановлен."
+            )
 
-        # Auto-cleanup when loop exits (auth error, unexpected error)
+        # Auto-cleanup when loop exits (auth error, unknown-error limit, setup failure)
         await self._auto_cleanup()
+
+    async def _loop_iteration(self) -> bool:
+        """One tick of the main loop. Returns False if the loop should exit
+        (e.g. auth-error limit reached), True otherwise."""
+        # Check WS health — notify ONCE per outage, not every loop tick
+        if self._ws:
+            if self._ws.consecutive_failures >= WS_FAILURE_NOTIFY_THRESHOLD:
+                if not self._ws_failure_notified:
+                    await self._send("⚠️ Проблемы с подключением к бирже. Проверяю...")
+                    self._ws_failure_notified = True
+            elif self._ws.consecutive_failures == 0 and self._ws_failure_notified:
+                # WS recovered — arm the notifier for next outage
+                self._ws_failure_notified = False
+
+        # Check sell fills
+        try:
+            closed = await self._order_manager.check_sell_fills(
+                self.user_id, self.settings.pair, self.positions
+            )
+            self._consecutive_auth_errors = 0
+            self._consecutive_network_errors = 0
+        except InvalidApiKey:
+            self._consecutive_auth_errors += 1
+            if self._consecutive_auth_errors >= API_KEY_ERROR_LIMIT:
+                log.error("api_key_invalid_auto_stop", user_id=self.user_id,
+                          errors=self._consecutive_auth_errors)
+                await self._send(
+                    "🔴 Алгоритм остановлен\n\n"
+                    "API ключи недействительны.\n"
+                    "Обновите ключи: /set_api\n"
+                    "Затем запустите торговлю заново."
+                )
+                return False
+            return True
+        except NetworkError as e:
+            self._consecutive_network_errors += 1
+            backoff = min(
+                self._consecutive_network_errors * 5,
+                NETWORK_BACKOFF_MAX,
+            )
+            log.warning("network_error",
+                        error=str(e),
+                        consecutive=self._consecutive_network_errors,
+                        backoff=backoff)
+            if self._consecutive_network_errors == NETWORK_ERROR_LIMIT:
+                await self._send(
+                    "⚠️ Проблемы с сетью, алгоритм продолжает работу...\n"
+                    "Попытка переподключения."
+                )
+                # Recreate HTTP session to clear stale connections
+                await self._client.close()
+            await asyncio.sleep(backoff)
+            return True
+        except MexcError:
+            return True
+
+        for pos in closed:
+            self.positions.remove(pos)
+            await self._notify_sell(pos)
+            # Sell freed up balance — allow new buys
+            self._no_funds_price = None
+
+            # Only the ACTIVE position triggers a new buy
+            if pos.id == self._active_position_id:
+                log.info("active_sell_filled", position_id=pos.id)
+                self._active_position_id = None
+                # Delay before re-buying (user-configurable)
+                delay = max(1, min(60, self.settings.auto_buy_interval))
+                log.info("auto_buy_delay", seconds=delay)
+                await asyncio.sleep(delay)
+                if self.state != EngineState.RUNNING:
+                    return True
+                await self._try_buy()
+
+        # Check for price-drop buy trigger (replaces active position)
+        if self.current_price > 0 and self.settings.drop_buy_enabled:
+            await self._check_drop_buy()
+
+        return True
 
     async def force_buy(self) -> None:
         """Force an immediate market buy, ignoring strategy conditions.
