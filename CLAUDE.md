@@ -78,7 +78,7 @@ Schema (`trading_settings` table) — auto-migrated via `PRAGMA table_info` on s
 - **Auto-stop**: 5 consecutive `InvalidApiKey` errors → engine stops, notifies user
 - **Network resilience**: timeouts wrapped in `NetworkError`, backoff 5→60s, session recreated after 10 consecutive errors. Engine **does not crash** on transient network failures
 - **`_safe_send` wrapper**: `send_message` is wrapped in `__init__` with try/except — a `TelegramNetworkError` from a notification never reaches the trading loop. Best-effort delivery only.
-- **WS-outage notification dedup**: `_ws_failure_notified` flag. "Проблемы с подключением к бирже" is sent ONCE per outage (when `consecutive_failures >= WS_FAILURE_NOTIFY_THRESHOLD`) and re-armed only after WS reconnects (`consecutive_failures == 0`). Prevents flood during long outages.
+- **WS-outage notification cooldown**: `_ws_last_notify_at` (monotonic timestamp). "Проблемы с подключением к бирже" is rate-limited to once per `WS_FAILURE_NOTIFY_COOLDOWN` (900s = 15 min). A boolean "notified" flag would have re-armed between back-to-back outages (saw 5 messages in 17 min on Jun 23 during a DNS outage where WS reconnected briefly between caskades). Cooldown survives that pattern.
 - **Iteration-level resilience**: loop body extracted into `_loop_iteration()`. Each tick is wrapped in try/except — unknown exceptions log + sleep 5s + retry. Auto-stop only after `UNKNOWN_ERROR_LIMIT` (20) consecutive unexpected failures, not on the first error.
 - Adaptive poll intervals: 30s (no positions), 5s (1-5), 3s (6+)
 

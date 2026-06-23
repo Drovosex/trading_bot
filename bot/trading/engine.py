@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta
 
 import structlog
@@ -37,6 +38,7 @@ POLL_INTERVAL_NO_POSITIONS = 30  # Just check WS is alive
 POLL_INTERVAL_FEW = 5            # 1-5 positions
 POLL_INTERVAL_MANY = 3           # 6+ positions
 WS_FAILURE_NOTIFY_THRESHOLD = 5
+WS_FAILURE_NOTIFY_COOLDOWN = 900  # Min seconds between "проблемы с подключением" messages
 API_KEY_ERROR_LIMIT = 5          # Auto-stop after this many consecutive auth failures
 NETWORK_ERROR_LIMIT = 10         # Notify user after this many consecutive network errors
 NETWORK_BACKOFF_MAX = 60         # Max backoff seconds on network errors
@@ -96,9 +98,11 @@ class TradingEngine:
         # Drop-buy won't trigger again until price drops FURTHER from this level.
         # Reset when a sell fills (balance freed up).
         self._no_funds_price: float | None = None
-        # True once we've notified the user about ongoing WS failures.
-        # Reset when WS reconnects, so the next outage notifies again.
-        self._ws_failure_notified: bool = False
+        # Monotonic timestamp of the last "проблемы с подключением" message.
+        # Used as a cooldown: even if WS briefly reconnects between
+        # back-to-back outages, we won't spam the user more than once per
+        # WS_FAILURE_NOTIFY_COOLDOWN seconds.
+        self._ws_last_notify_at: float = 0.0
 
     # ─── Public API ──────────────────────────────────────────────────
 
@@ -252,15 +256,15 @@ class TradingEngine:
     async def _loop_iteration(self) -> bool:
         """One tick of the main loop. Returns False if the loop should exit
         (e.g. auth-error limit reached), True otherwise."""
-        # Check WS health — notify ONCE per outage, not every loop tick
-        if self._ws:
-            if self._ws.consecutive_failures >= WS_FAILURE_NOTIFY_THRESHOLD:
-                if not self._ws_failure_notified:
-                    await self._send("⚠️ Проблемы с подключением к бирже. Проверяю...")
-                    self._ws_failure_notified = True
-            elif self._ws.consecutive_failures == 0 and self._ws_failure_notified:
-                # WS recovered — arm the notifier for next outage
-                self._ws_failure_notified = False
+        # Check WS health — notify at most once per WS_FAILURE_NOTIFY_COOLDOWN.
+        # Brief reconnects between back-to-back outages would otherwise re-arm
+        # a simple boolean flag and produce a flood of identical messages
+        # (saw 5 messages in 17 min on Jun 23 during a DNS outage).
+        if self._ws and self._ws.consecutive_failures >= WS_FAILURE_NOTIFY_THRESHOLD:
+            now = time.monotonic()
+            if now - self._ws_last_notify_at >= WS_FAILURE_NOTIFY_COOLDOWN:
+                await self._send("⚠️ Проблемы с подключением к бирже. Проверяю...")
+                self._ws_last_notify_at = now
 
         # Check sell fills
         try:
