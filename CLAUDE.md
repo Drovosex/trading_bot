@@ -69,13 +69,17 @@ Schema (`trading_settings` table) — auto-migrated via `PRAGMA table_info` on s
 ### Trading Engine
 - One `TradingEngine` instance per user, stored in `app["engines"]`
 - WebSocket for real-time price + REST fallback every 15s for low-volume pairs
-- Active position concept: only the last buy triggers re-buy on sell fill
+- **Active position concept**: only ONE position is the "active" one — only its sell fill triggers a new buy. Drop-buy also replaces the active position.
+- **Active position pick on start**: when starting with existing positions, the one with the **lowest `sell_target_price`** becomes active (it'll sell first). The initial `_try_buy()` is skipped — no fresh buy on top of existing inventory. User is notified which order is active.
 - **Auto-buy delay**: after sell of active position, wait `auto_buy_interval` seconds before new buy (interruptible if engine stopped)
 - **Drop-buy toggle**: `_check_drop_buy` skipped entirely if `settings.drop_buy_enabled` is False
 - **`_reconcile()` sends notifications** for positions filled while bot was offline (previously silent)
 - **`_no_funds_price` flag**: after insufficient-funds failure, notify once; suppress repeat notifications until price drops another `drop_pct` below failure point, or a sell frees balance
 - **Auto-stop**: 5 consecutive `InvalidApiKey` errors → engine stops, notifies user
 - **Network resilience**: timeouts wrapped in `NetworkError`, backoff 5→60s, session recreated after 10 consecutive errors. Engine **does not crash** on transient network failures
+- **`_safe_send` wrapper**: `send_message` is wrapped in `__init__` with try/except — a `TelegramNetworkError` from a notification never reaches the trading loop. Best-effort delivery only.
+- **WS-outage notification dedup**: `_ws_failure_notified` flag. "Проблемы с подключением к бирже" is sent ONCE per outage (when `consecutive_failures >= WS_FAILURE_NOTIFY_THRESHOLD`) and re-armed only after WS reconnects (`consecutive_failures == 0`). Prevents flood during long outages.
+- **Iteration-level resilience**: loop body extracted into `_loop_iteration()`. Each tick is wrapped in try/except — unknown exceptions log + sleep 5s + retry. Auto-stop only after `UNKNOWN_ERROR_LIMIT` (20) consecutive unexpected failures, not on the first error.
 - Adaptive poll intervals: 30s (no positions), 5s (1-5), 3s (6+)
 
 ### MEXC API
@@ -98,6 +102,8 @@ Schema (`trading_settings` table) — auto-migrated via `PRAGMA table_info` on s
 - DB: `/opt/trading_bot/data/bot.db`
 - Deploy: `scp` files → `systemctl restart trading-bot`
 - **journald limit**: 50MB (configured in `/etc/systemd/journald.conf`) to prevent memory pressure on 1GB VPS
+- **Weekly auto-restart**: systemd timer `trading-bot-restart.timer` (Sun 02:00 UTC, `Persistent=true`, randomized delay up to 5 min) restarts the bot to mitigate the slow memory drift (~2 MB/day). Units live at `/etc/systemd/system/trading-bot-restart.{service,timer}`.
+- **Telegram IP pin**: `/etc/hosts` has `149.154.167.220 api.telegram.org` because the IP that DNS returns for the VPS is unreachable from this provider. If that pinned IP ever fails, try another Telegram DC IP (`149.154.167.197/99/220`).
 
 ## Local-only context
 Bot username, admin Telegram ID and VPS IP are stored in `CLAUDE.local.md`
