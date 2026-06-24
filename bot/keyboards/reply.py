@@ -11,7 +11,8 @@ ALL_MENU_BUTTONS = {BTN_TRADING, BTN_INFO, BTN_SETTINGS, BTN_HELP}
 
 
 def main_menu_kb() -> ReplyKeyboardMarkup:
-    """Persistent reply keyboard with main menu sections."""
+    """Reply keyboard with main menu sections.
+    is_persistent=False so the keyboard hides on system Back press."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -24,5 +25,5 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
             ],
         ],
         resize_keyboard=True,
-        is_persistent=True,
+        is_persistent=False,
     )
