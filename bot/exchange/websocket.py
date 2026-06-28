@@ -44,6 +44,10 @@ class MexcWebSocket:
         self._task: asyncio.Task | None = None
         self._reconnect_delay = 2
         self._consecutive_failures = 0
+        # Set to True when MEXC explicitly rejects our subscription
+        # ("Blocked!" — IP-level public WS block). Reconnect loop stops;
+        # engine should fall back to REST-only price polling.
+        self._subscription_blocked: bool = False
 
     async def start(self) -> None:
         self._running = True
@@ -63,6 +67,10 @@ class MexcWebSocket:
 
     async def _run_loop(self) -> None:
         while self._running:
+            if self._subscription_blocked:
+                # MEXC has blocked our IP from public WS — stop churning.
+                # Engine will rely on REST price polling.
+                break
             try:
                 # Disable built-in ping — MEXC uses application-level pings
                 async with websockets.connect(
@@ -128,7 +136,28 @@ class MexcWebSocket:
             try:
                 data = json.loads(raw)
 
-                # PONG response — skip
+                # Server-initiated PING — MUST respond with PONG, otherwise
+                # MEXC closes the connection within ~60 seconds.
+                if data.get("method") == "PING" or data.get("msg") == "PING":
+                    pong = {"method": "PONG"}
+                    if "id" in data:
+                        pong["id"] = data["id"]
+                    await ws.send(json.dumps(pong))
+                    continue
+
+                # Subscription was rejected — MEXC has blocked the IP
+                # from public WS data. No point retrying.
+                msg = data.get("msg") or ""
+                if "Not Subscribed" in msg or "Blocked" in msg:
+                    log.error(
+                        "ws_subscription_blocked",
+                        symbols=self._symbols,
+                        reason=msg.strip(),
+                    )
+                    self._subscription_blocked = True
+                    return  # exit _listen → exit async with → _run_loop breaks
+
+                # Our own PONG echo from server — skip
                 if data.get("msg") == "PONG" or data.get("code") == 0:
                     continue
 

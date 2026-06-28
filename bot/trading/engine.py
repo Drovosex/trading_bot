@@ -103,6 +103,10 @@ class TradingEngine:
         # back-to-back outages, we won't spam the user more than once per
         # WS_FAILURE_NOTIFY_COOLDOWN seconds.
         self._ws_last_notify_at: float = 0.0
+        # True after we've notified the user that MEXC blocked our WS and
+        # we've fallen back to REST-only price polling. Prevents repeat
+        # notifications across the engine lifetime.
+        self._ws_blocked_notified: bool = False
 
     # ─── Public API ──────────────────────────────────────────────────
 
@@ -256,11 +260,22 @@ class TradingEngine:
     async def _loop_iteration(self) -> bool:
         """One tick of the main loop. Returns False if the loop should exit
         (e.g. auth-error limit reached), True otherwise."""
-        # Check WS health — notify at most once per WS_FAILURE_NOTIFY_COOLDOWN.
-        # Brief reconnects between back-to-back outages would otherwise re-arm
-        # a simple boolean flag and produce a flood of identical messages
-        # (saw 5 messages in 17 min on Jun 23 during a DNS outage).
-        if self._ws and self._ws.consecutive_failures >= WS_FAILURE_NOTIFY_THRESHOLD:
+        # MEXC permanently blocked our public WS (IP-level). Notify once,
+        # then go quiet — REST price polling keeps the algorithm running.
+        if self._ws and self._ws._subscription_blocked and not self._ws_blocked_notified:
+            await self._send(
+                "ℹ️ MEXC заблокировал WebSocket для этого IP.\n"
+                "Алгоритм продолжает работу по REST (цена обновляется раз в 15 сек)."
+            )
+            self._ws_blocked_notified = True
+
+        # Transient WS outage — notify at most once per WS_FAILURE_NOTIFY_COOLDOWN.
+        # Skip entirely if subscription is permanently blocked (no point yelling).
+        if (
+            self._ws
+            and not self._ws._subscription_blocked
+            and self._ws.consecutive_failures >= WS_FAILURE_NOTIFY_THRESHOLD
+        ):
             now = time.monotonic()
             if now - self._ws_last_notify_at >= WS_FAILURE_NOTIFY_COOLDOWN:
                 await self._send("⚠️ Проблемы с подключением к бирже. Проверяю...")
