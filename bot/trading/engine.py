@@ -429,10 +429,17 @@ class TradingEngine:
             log.info("active_position_set", position_id=position.id)
             await self._notify_buy(position)
         else:
-            await self._send(
-                "❌ Покупка не выполнена.\n"
-                "Проверьте логи или попробуйте ещё раз: /buy"
-            )
+            # execute_buy returned None — order rejected by exchange
+            # (e.g. MEXC error 30004 "Insufficient position"). Without
+            # arming _no_funds_price the drop-buy check fires every tick
+            # and the user gets a flood of "Цена упала / Покупка не
+            # выполнена" message pairs. Same suppression as OrderTooSmall.
+            if self._no_funds_price is None:
+                await self._send(
+                    "❌ Покупка не выполнена.\n"
+                    "Проверьте логи или попробуйте ещё раз: /buy"
+                )
+            self._no_funds_price = self.current_price
 
     async def _check_drop_buy(self) -> None:
         """Check if price has dropped enough to trigger a new buy."""
