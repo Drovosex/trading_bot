@@ -94,10 +94,12 @@ class TradingEngine:
         self._active_position_id: int | None = None
         self._consecutive_auth_errors: int = 0
         self._consecutive_network_errors: int = 0
-        # Price at which last buy attempt failed due to insufficient funds.
-        # Drop-buy won't trigger again until price drops FURTHER from this level.
-        # Reset when a sell fills (balance freed up).
-        self._no_funds_price: float | None = None
+        # Buying is paused after a buy fails for lack of funds (insufficient
+        # balance, order-too-small, or exchange rejection). While paused the
+        # engine STOPS initiating buys (both auto-buy-after-sell and drop-buy)
+        # but keeps monitoring open positions. It resumes automatically when a
+        # sell fills and frees balance. Prevents the infinite buy-retry loop.
+        self._buying_paused: bool = False
         # Monotonic timestamp of the last "проблемы с подключением" message.
         # Used as a cooldown: even if WS briefly reconnects between
         # back-to-back outages, we won't spam the user more than once per
@@ -326,8 +328,14 @@ class TradingEngine:
         for pos in closed:
             self.positions.remove(pos)
             await self._notify_sell(pos)
-            # Sell freed up balance — allow new buys
-            self._no_funds_price = None
+
+            # A sell freed balance — lift the buying pause if it was set.
+            if self._buying_paused:
+                log.info("buying_resumed_after_sell", position_id=pos.id)
+                self._buying_paused = False
+                await self._send(
+                    "🟢 Покупки возобновлены — баланс освобождён после продажи."
+                )
 
             # Only the ACTIVE position triggers a new buy
             if pos.id == self._active_position_id:
@@ -341,8 +349,13 @@ class TradingEngine:
                     return True
                 await self._try_buy()
 
-        # Check for price-drop buy trigger (replaces active position)
-        if self.current_price > 0 and self.settings.drop_buy_enabled:
+        # Check for price-drop buy trigger (replaces active position).
+        # Skip entirely while buying is paused for lack of funds.
+        if (
+            not self._buying_paused
+            and self.current_price > 0
+            and self.settings.drop_buy_enabled
+        ):
             await self._check_drop_buy()
 
         return True
@@ -395,26 +408,19 @@ class TradingEngine:
         try:
             size = compute_order_size(self.settings, free, capital)
         except OrderTooSmall as e:
-            # Only notify once — until a sell fills and frees up balance
-            if self._no_funds_price is None:
-                order_type_label = "динамический" if self.settings.order_type.value == "dynamic" else "фиксированный"
-                await self._send(
-                    f"⚠️ Размер ордера слишком мал\n\n"
-                    f"Тип: {order_type_label}, параметр: {self.settings.order_param}\n"
-                    f"Рассчитанный размер: {e.computed:.2f} {quote_asset}\n"
-                    f"Минимум биржи: {e.minimum:.2f} {quote_asset}\n\n"
-                    f"💡 Увеличьте размер ордера через /settings\n"
-                    f"или переключитесь на фиксированный ордер."
-                )
-            self._no_funds_price = self.current_price
+            order_type_label = "динамический" if self.settings.order_type.value == "dynamic" else "фиксированный"
+            await self._pause_buying(
+                f"⚠️ Размер ордера слишком мал\n\n"
+                f"Тип: {order_type_label}, параметр: {self.settings.order_param}\n"
+                f"Рассчитанный размер: {e.computed:.2f} {quote_asset}\n"
+                f"Минимум биржи: {e.minimum:.2f} {quote_asset}\n\n"
+                f"💡 Увеличьте размер ордера через /settings"
+            )
             return
         if size is None:
-            # Only notify once — until a sell fills and frees up balance
-            if self._no_funds_price is None:
-                await self._send(
-                    format_insufficient_funds(free, self.settings.order_param, quote_asset)
-                )
-            self._no_funds_price = self.current_price
+            await self._pause_buying(
+                format_insufficient_funds(free, self.settings.order_param, quote_asset)
+            )
             return
 
         position = await self._order_manager.execute_buy(
@@ -423,39 +429,42 @@ class TradingEngine:
         if position:
             self.positions.append(position)
             self._last_buy_check_price = position.buy_price
-            self._no_funds_price = None  # Funds available — reset flag
+            self._buying_paused = False  # Funds available — clear pause
             # This position becomes the active one
             self._active_position_id = position.id
             log.info("active_position_set", position_id=position.id)
             await self._notify_buy(position)
         else:
             # execute_buy returned None — order rejected by exchange
-            # (e.g. MEXC error 30004 "Insufficient position"). Without
-            # arming _no_funds_price the drop-buy check fires every tick
-            # and the user gets a flood of "Цена упала / Покупка не
-            # выполнена" message pairs. Same suppression as OrderTooSmall.
-            if self._no_funds_price is None:
-                await self._send(
-                    "❌ Покупка не выполнена.\n"
-                    "Проверьте логи или попробуйте ещё раз: /buy"
-                )
-            self._no_funds_price = self.current_price
+            # (e.g. MEXC error 30004 "Insufficient position").
+            await self._pause_buying("❌ Покупка не выполнена — недостаточно средств.")
+
+    async def _pause_buying(self, detail: str) -> None:
+        """Stop initiating buys after a funds-related failure. Notifies the
+        user ONCE on the transition into the paused state, then stays quiet.
+        Open positions keep being monitored; buying resumes automatically
+        when a sell frees balance (see the sell-fill loop)."""
+        if self._buying_paused:
+            return  # Already paused — suppress repeat notifications
+        self._buying_paused = True
+        log.warning("buying_paused", user_id=self.user_id)
+        await self._send(
+            f"{detail}\n\n"
+            f"⏸ Покупки приостановлены — недостаточно средств.\n"
+            f"Бот продолжает отслеживать открытые позиции.\n"
+            f"Покупки возобновятся после продажи или пополнения баланса (/buy)."
+        )
 
     async def _check_drop_buy(self) -> None:
         """Check if price has dropped enough to trigger a new buy."""
+        # Guarded by the caller, but double-check: never drop-buy while paused.
+        if self._buying_paused:
+            return
+
         if not self._strategy.should_buy(
             self.current_price, self.positions, self.settings
         ):
             return
-
-        # If last buy failed due to no funds, only retry when price drops further
-        # (another drop_pct below the price where we failed)
-        if self._no_funds_price is not None:
-            next_retry_price = compute_drop_price(self._no_funds_price, self.settings.drop_pct)
-            if self.current_price > next_retry_price:
-                return  # Price hasn't dropped enough since last failed attempt
-            # Price dropped further — reset flag and try again
-            self._no_funds_price = None
 
         # Notify price drop
         last_price = self._strategy.get_last_buy_price(self.positions)
