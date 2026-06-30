@@ -44,6 +44,10 @@ NETWORK_ERROR_LIMIT = 10         # Notify user after this many consecutive netwo
 NETWORK_BACKOFF_MAX = 60         # Max backoff seconds on network errors
 UNKNOWN_ERROR_LIMIT = 20         # Auto-stop after this many consecutive unexpected errors
 UNKNOWN_ERROR_SLEEP = 5          # Sleep between recovery attempts
+# REST price poll interval. MEXC blocks public WS for this IP, so REST is the
+# primary price source. /api/v3/ticker/price is weight-1; one symbol every 3s
+# is ~0.3 req/s, far under the ~20 req/s IP limit. Was 15s (WS-fallback era).
+REST_PRICE_POLL_INTERVAL = 3
 
 
 class TradingEngine:
@@ -563,10 +567,11 @@ class TradingEngine:
     # ─── REST price fallback ────────────────────────────────────────
 
     async def _rest_price_loop(self) -> None:
-        """Periodically fetch price via REST for low-volume pairs where WS may not send updates."""
+        """Primary price source: poll the ticker via REST. MEXC blocks public
+        WS for this IP, so this loop (not WS) keeps current_price fresh."""
         try:
             while self.state == EngineState.RUNNING:
-                await asyncio.sleep(15)
+                await asyncio.sleep(REST_PRICE_POLL_INTERVAL)
                 try:
                     price = await self._client.get_ticker_price(self.settings.pair)
                     if price > 0:
