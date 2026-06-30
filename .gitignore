@@ -19,3 +19,4 @@ build/
 .vscode/
 .claude/
 CLAUDE.local.md
+graphify-out/
